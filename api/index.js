@@ -5,6 +5,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -22,6 +23,9 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
+// User database (in production, use a real database)
+const users = {};
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
@@ -50,18 +54,103 @@ const client = new OpenAI({
   apiKey: process.env.HF_TOKEN,
 });
 
+// Default user image (the one you provided)
+const DEFAULT_USER_IMAGE = "https://arsynoxhash.dpdns.org/file/BQACAgUAAyEGAAS6vrhKAANZaS_jqaCAc93eN8vSw2FgRmD3A1cAAmQZAAKEhIFVH23W0BCfsec82BA.jpg";
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'ArsyChat API is running' });
 });
 
-// Chat endpoint
+// User registration/login endpoint
+app.post('/api/user', (req, res) => {
+  try {
+    const { username } = req.body;
+    
+    if (!username) {
+      return res.status(400).json({ error: 'Username is required' });
+    }
+
+    // Generate user ID
+    const userId = crypto.createHash('md5').update(username).digest('hex');
+    
+    // Create or get user
+    if (!users[userId]) {
+      users[userId] = {
+        id: userId,
+        username,
+        imageUrl: DEFAULT_USER_IMAGE,
+        createdAt: new Date().toISOString(),
+        messageCount: 0
+      };
+    }
+
+    res.json({
+      success: true,
+      user: users[userId]
+    });
+    
+  } catch (error) {
+    console.error('User error:', error);
+    res.status(500).json({ 
+      error: 'Failed to process user request',
+      details: error.message 
+    });
+  }
+});
+
+// Update user profile image
+app.post('/api/user/image', upload.single('image'), (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    if (!userId || !users[userId]) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    // Convert buffer to base64
+    const base64Image = req.file.buffer.toString('base64');
+    const mimeType = req.file.mimetype;
+    const imageUrl = `data:${mimeType};base64,${base64Image}`;
+
+    // Update user image
+    users[userId].imageUrl = imageUrl;
+    users[userId].updatedAt = new Date().toISOString();
+
+    res.json({
+      success: true,
+      message: 'Profile image updated successfully',
+      user: users[userId]
+    });
+
+  } catch (error) {
+    console.error('User image update error:', error);
+    res.status(500).json({ 
+      error: 'Failed to update profile image',
+      details: error.message 
+    });
+  }
+});
+
+// Chat endpoint with user context
 app.post('/api/chat', async (req, res) => {
   try {
-    const { messages, model = "moonshotai/Kimi-K2-Thinking:novita" } = req.body;
+    const { messages, model = "moonshotai/Kimi-K2-Thinking:novita", userId } = req.body;
     
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: 'Messages array is required' });
+    }
+
+    // Get user info if userId provided
+    let userInfo = null;
+    if (userId && users[userId]) {
+      userInfo = users[userId];
+      // Increment message count
+      users[userId].messageCount += 1;
     }
 
     const chatCompletion = await client.chat.completions.create({
@@ -72,6 +161,133 @@ app.post('/api/chat', async (req, res) => {
     });
 
     const response = chatCompletion.choices[0].message;
+    
+    // Add user info to response if available
+    res.json({ 
+      response,
+      user: userInfo
+    });
+    
+  } catch (error) {
+    console.error('Chat error:', error);
+    res.status(500).json({ 
+      error: 'Failed to process chat request',
+      details: error.message 
+    });
+  }
+});
+
+// Image upload endpoint (for chat images)
+app.post('/api/upload', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file provided' });
+    }
+
+    // Convert buffer to base64
+    const base64Image = req.file.buffer.toString('base64');
+    const mimeType = req.file.mimetype;
+    const imageUrl = `data:${mimeType};base64,${base64Image}`;
+
+    res.json({
+      success: true,
+      message: 'Image uploaded successfully',
+      imageUrl: imageUrl,
+      fileName: req.file.originalname,
+      size: req.file.size,
+      mimeType: mimeType
+    });
+
+  } catch (error) {
+    console.error('Upload error:', error);
+    res.status(500).json({ 
+      error: 'Failed to upload image',
+      details: error.message 
+    });
+  }
+});
+
+// Available models endpoint
+app.get('/api/models', (req, res) => {
+  const models = [
+    {
+      id: "moonshotai/Kimi-K2-Thinking:novita",
+      name: "Moonshot Kimi K2",
+      description: "Advanced thinking model with strong reasoning capabilities"
+    },
+    {
+      id: "deepseek-ai/DeepSeek-V3.2:novita",
+      name: "DeepSeek V3.2",
+      description: "Latest DeepSeek model with excellent performance"
+    },
+    {
+      id: "meta-llama/Llama-3.3-70B-Instruct:novita",
+      name: "Llama 3.3 70B",
+      description: "Meta's powerful open-source model"
+    },
+    {
+      id: "Qwen/Qwen2.5-72B-Instruct:novita",
+      name: "Qwen 2.5 72B",
+      description: "Alibaba's advanced multilingual model"
+    }
+  ];
+  
+  res.json({ models });
+});
+
+// Get user statistics
+app.get('/api/user/:userId/stats', (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    if (!users[userId]) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      success: true,
+      stats: {
+        messageCount: users[userId].messageCount,
+        joined: users[userId].createdAt,
+        lastActive: users[userId].updatedAt || users[userId].createdAt
+      }
+    });
+
+  } catch (error) {
+    console.error('Stats error:', error);
+    res.status(500).json({ 
+      error: 'Failed to get user stats',
+      details: error.message 
+    });
+  }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File size too large. Maximum is 10MB' });
+    }
+    return res.status(400).json({ error: err.message });
+  }
+  
+  res.status(500).json({ 
+    error: 'Something went wrong!',
+    details: err.message 
+  });
+});
+
+// Start server
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Default user image: ${DEFAULT_USER_IMAGE}`);
+  });
+}
+
+export default app;    const response = chatCompletion.choices[0].message;
     res.json({ response });
     
   } catch (error) {
