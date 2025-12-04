@@ -2,5 +2,5 @@ name = "arsychat-api"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
-# Do not put your actual token here for security.
-# You will add it via command line or dashboard.
+[observability]
+enabled = true
