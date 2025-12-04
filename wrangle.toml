@@ -1,6 +1,6 @@
-name = "arsynox-api"
-main = "index.js"
+name = "chat-backend"
+main = "src/index.js"
 compatibility_date = "2024-01-01"
 
-[observability]
-enabled = true
+# Do not put the actual token here for security.
+# Use `wrangler secret put HF_TOKEN` in the terminal.
