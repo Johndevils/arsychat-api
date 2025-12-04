@@ -1,85 +1,107 @@
-import { OpenAI } from "openai";
+/**
+ * Cloudflare Worker for Chat Backend
+ */
+
+// Define available models
+const MODELS = {
+	kimi: "moonshotai/Kimi-K2-Thinking:novita",
+	deepseek: "deepseek-ai/DeepSeek-V3.2:novita",
+};
 
 export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
+	async fetch(request, env, ctx) {
+		const url = new URL(request.url);
 
-    // --- 1. CORS SETTINGS (Allow Frontend Access) ---
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*", // Change "*" to your domain in production
-      "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    };
+		// 1. CORS Headers (Allow frontend to connect)
+		const corsHeaders = {
+			"Access-Control-Allow-Origin": "*", // Change '*' to your frontend domain in production
+			"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+			"Access-Control-Allow-Headers": "Content-Type, Authorization",
+		};
 
-    // Handle Preflight Request
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
+		// 2. Handle Preflight Requests (OPTIONS)
+		if (request.method === "OPTIONS") {
+			return new Response(null, { headers: corsHeaders });
+		}
 
-    // --- 2. HEALTH CHECK (/health) ---
-    if (url.pathname === "/health") {
-      return new Response(JSON.stringify({ status: "online", system: "Arsynox Backend" }), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
-    }
+		// 3. Endpoint: /health
+		if (url.pathname === "/health") {
+			return new Response(JSON.stringify({ status: "ok", service: "chat-backend" }), {
+				headers: { ...corsHeaders, "Content-Type": "application/json" },
+			});
+		}
 
-    // --- 3. CHAT ENDPOINT (/api/chat) ---
-    if (url.pathname === "/api/chat") {
-      
-      if (request.method !== "POST") {
-        return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
-      }
+		// 4. Endpoint: /api/chat
+		// Usage: POST /api/chat?model=kimi OR /api/chat?model=deepseek
+		if (url.pathname === "/api/chat" && request.method === "POST") {
+			try {
+				// Get model from query param (default to deepseek if missing)
+				const modelKey = url.searchParams.get("model");
+				
+				// Validate model
+				let selectedModel = MODELS[modelKey];
+				
+				// If the user passed the full raw string instead of the short key, use that
+				if (!selectedModel && Object.values(MODELS).includes(modelKey)) {
+					selectedModel = modelKey;
+				}
 
-      try {
-        // A. Parse Body
-        const body = await request.json();
-        const { messages, model } = body;
+				if (!selectedModel) {
+					return new Response(JSON.stringify({ 
+						error: "Invalid model. Use 'kimi' or 'deepseek'" 
+					}), {
+						status: 400,
+						headers: { ...corsHeaders, "Content-Type": "application/json" }
+					});
+				}
 
-        // B. Model Switching Logic
-        // Checks URL param (?model=kimik2) OR Body ({ model: "kimik2" })
-        const urlModelParam = url.searchParams.get("model");
-        const requestedModel = urlModelParam || model; 
+				// Check if HF_TOKEN is set
+				if (!env.HF_TOKEN) {
+					return new Response(JSON.stringify({ error: "Server misconfiguration: HF_TOKEN missing" }), {
+						status: 500,
+						headers: corsHeaders
+					});
+				}
 
-        let targetModel = "deepseek-ai/DeepSeek-V3.2:novita"; // Default
+				// Parse user request body
+				const reqBody = await request.json();
 
-        if (requestedModel && requestedModel.includes("Kimi")) {
-           targetModel = "moonshotai/Kimi-K2-Thinking:novita";
-        } else if (requestedModel === "kimik2") {
-           targetModel = "moonshotai/Kimi-K2-Thinking:novita";
-        }
+				// Construct payload for Hugging Face
+				const payload = {
+					model: selectedModel,
+					messages: reqBody.messages,
+					stream: false, // Set to true if you implement streaming later
+					max_tokens: reqBody.max_tokens || 1024,
+					temperature: reqBody.temperature || 0.7
+				};
 
-        // C. Initialize OpenAI with Hugging Face Router
-        const client = new OpenAI({
-          baseURL: "https://router.huggingface.co/v1",
-          apiKey: env.HF_TOKEN, // Gets secret from Cloudflare
-        });
+				// Call Hugging Face API
+				const hfResponse = await fetch("https://router.huggingface.co/v1/chat/completions", {
+					method: "POST",
+					headers: {
+						"Authorization": `Bearer ${env.HF_TOKEN}`,
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify(payload),
+				});
 
-        // D. Generate AI Response
-        const chatCompletion = await client.chat.completions.create({
-          model: targetModel,
-          messages: messages || [{ role: "user", content: "Hello" }],
-          max_tokens: 1024,
-          temperature: 0.7,
-        });
+				// Return the HF response directly to the user
+				const data = await hfResponse.json();
+				
+				return new Response(JSON.stringify(data), {
+					status: hfResponse.status,
+					headers: { ...corsHeaders, "Content-Type": "application/json" },
+				});
 
-        // E. Return Success
-        return new Response(JSON.stringify(chatCompletion.choices[0].message), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+			} catch (err) {
+				return new Response(JSON.stringify({ error: err.message }), {
+					status: 500,
+					headers: { ...corsHeaders, "Content-Type": "application/json" },
+				});
+			}
+		}
 
-      } catch (error) {
-        return new Response(JSON.stringify({ error: error.message }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-    }
-
-    // --- 4. 404 Not Found ---
-    return new Response("Endpoint Not Found. Use /api/chat", { 
-      status: 404, 
-      headers: corsHeaders 
-    });
-  },
+		// 404 for any other route
+		return new Response("Not Found", { status: 404, headers: corsHeaders });
+	},
 };
