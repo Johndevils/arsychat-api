@@ -4,86 +4,93 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // --- 1. GLOBAL CORS CONFIGURATION ---
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, GET, OPTIONS", // Added GET for health check
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
     };
 
-    // Handle Preflight (OPTIONS)
     if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, { status: 204, headers: corsHeaders });
     }
 
-    // --- 2. HEALTH ENDPOINT (/health) ---
-    // Simple check to see if server is alive
     if (url.pathname === "/health") {
-      return new Response(JSON.stringify({ 
-        status: "online", 
-        service: "Arsynox API", 
-        timestamp: new Date().toISOString() 
+      return new Response(JSON.stringify({
+        status: "online",
+        service: "Arsynox API",
+        timestamp: new Date().toISOString()
       }), {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
 
-    // --- 3. CHAT ENDPOINT (/api/chat) ---
     if (url.pathname === "/api/chat") {
-      
-      // Ensure Method is POST
       if (request.method !== "POST") {
-        return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
+        return new Response(JSON.stringify({ error: "Method Not Allowed" }), {
+          status: 405,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
       }
 
       try {
-        // --- A. MODEL SELECTION LOGIC ---
-        // Usage: /api/chat?model=kimik2
         const modelParam = url.searchParams.get("model");
-        let targetModel;
+        const targetModel = modelParam === "kimik2"
+          ? "moonshotai/Kimi-K2-Thinking:novita"
+          : "deepseek-ai/DeepSeek-V3.2:novita";
 
-        if (modelParam === "kimik2") {
-          targetModel = "moonshotai/Kimi-K2-Thinking:novita";
-        } else {
-          // Default to DeepSeek
-          targetModel = "deepseek-ai/DeepSeek-V3.2:novita";
-        }
-
-        // --- B. INITIALIZE OPENAI CLIENT ---
+        // init client (bundling required)
         const client = new OpenAI({
           baseURL: "https://router.huggingface.co/v1",
           apiKey: env.HF_TOKEN,
         });
 
-        // --- C. PARSE BODY ---
-        const body = await request.json();
-        const { messages } = body;
+        // parse body safely
+        let body;
+        try {
+          body = await request.json();
+        } catch (err) {
+          return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
 
-        // --- D. GENERATE AI RESPONSE ---
+        const { messages } = body;
+        if (!Array.isArray(messages) || messages.length === 0) {
+          return new Response(JSON.stringify({ error: "messages must be a non-empty array" }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
         const chatCompletion = await client.chat.completions.create({
           model: targetModel,
-          messages: messages || [{ role: "user", content: "Hello" }],
+          messages,
           max_tokens: 1024,
         });
 
-        // --- E. RETURN RESULT ---
-        return new Response(JSON.stringify(chatCompletion.choices[0].message), {
+        // return the whole completion object (or pick what you want)
+        return new Response(JSON.stringify(chatCompletion), {
+          status: 200,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
 
       } catch (error) {
-        return new Response(JSON.stringify({ error: error.message }), {
+        const safe = {
+          message: error?.message || String(error),
+          stack: error?.stack ? error.stack.split("\n").slice(0,3).join("\n") : undefined
+        };
+        return new Response(JSON.stringify({ error: safe }), {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
     }
 
-    // --- 4. 404 NOT FOUND ---
-    return new Response(JSON.stringify({ error: "Endpoint not found" }), { 
-      status: 404, 
-      headers: { ...corsHeaders, "Content-Type": "application/json" } 
+    return new Response(JSON.stringify({ error: "Endpoint not found" }), {
+      status: 404,
+      headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
   },
 };
