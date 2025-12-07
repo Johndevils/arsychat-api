@@ -2,5 +2,5 @@ name = "arsychat-api"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
-# Do not put the actual token here for security.
-# Use `wrangler secret put HF_TOKEN` in the terminal.
+# We don't put the API key here for security.
+# You will add it via command line: npx wrangler secret put HF_TOKEN
