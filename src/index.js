@@ -1,107 +1,83 @@
-/**
- * Cloudflare Worker for Chat Backend
- */
+// src/index.js
 
-// Define available models
+// Map specific URL slugs to the full Hugging Face Model IDs
 const MODELS = {
-	kimi: "moonshotai/Kimi-K2-Thinking:novita",
-	deepseek: "deepseek-ai/DeepSeek-V3.2:novita",
+  "glm": "zai-org/GLM-4.6",
+  "deepseek": "deepseek-ai/DeepSeek-V3.2",
+  "kimi": "moonshotai/Kimi-K2-Thinking",
+  "qwen": "Qwen/Qwen3-VL-8B-Instruct"
 };
 
 export default {
-	async fetch(request, env, ctx) {
-		const url = new URL(request.url);
+  async fetch(request, env, ctx) {
+    // 1. Handle CORS (Allow access from any website)
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        },
+      });
+    }
 
-		// 1. CORS Headers (Allow frontend to connect)
-		const corsHeaders = {
-			"Access-Control-Allow-Origin": "*", // Change '*' to your frontend domain in production
-			"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-			"Access-Control-Allow-Headers": "Content-Type, Authorization",
-		};
+    // Only allow POST requests
+    if (request.method !== "POST") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
 
-		// 2. Handle Preflight Requests (OPTIONS)
-		if (request.method === "OPTIONS") {
-			return new Response(null, { headers: corsHeaders });
-		}
+    const url = new URL(request.url);
 
-		// 3. Endpoint: /health
-		if (url.pathname === "/health") {
-			return new Response(JSON.stringify({ status: "ok", service: "chat-backend" }), {
-				headers: { ...corsHeaders, "Content-Type": "application/json" },
-			});
-		}
+    try {
+      // 2. ROUTING LOGIC
+      // Expected URL pattern: /api/<model_slug>/v1/chat/completions
+      // Regex to capture the word between /api/ and /v1
+      const pathRegex = /^\/api\/([a-zA-Z0-9-]+)\/v1/;
+      const match = url.pathname.match(pathRegex);
 
-		// 4. Endpoint: /api/chat
-		// Usage: POST /api/chat?model=kimi OR /api/chat?model=deepseek
-		if (url.pathname === "/api/chat" && request.method === "POST") {
-			try {
-				// Get model from query param (default to deepseek if missing)
-				const modelKey = url.searchParams.get("model");
-				
-				// Validate model
-				let selectedModel = MODELS[modelKey];
-				
-				// If the user passed the full raw string instead of the short key, use that
-				if (!selectedModel && Object.values(MODELS).includes(modelKey)) {
-					selectedModel = modelKey;
-				}
+      if (!match || !match[1]) {
+        return new Response("Invalid API Endpoint format. Use /api/<model>/v1", { status: 404 });
+      }
 
-				if (!selectedModel) {
-					return new Response(JSON.stringify({ 
-						error: "Invalid model. Use 'kimi' or 'deepseek'" 
-					}), {
-						status: 400,
-						headers: { ...corsHeaders, "Content-Type": "application/json" }
-					});
-				}
+      const modelSlug = match[1]; // e.g., "kimi", "deepseek"
+      const targetModelId = MODELS[modelSlug];
 
-				// Check if HF_TOKEN is set
-				if (!env.HF_TOKEN) {
-					return new Response(JSON.stringify({ error: "Server misconfiguration: HF_TOKEN missing" }), {
-						status: 500,
-						headers: corsHeaders
-					});
-				}
+      if (!targetModelId) {
+        return new Response(`Model '${modelSlug}' not found. Available: ${Object.keys(MODELS).join(", ")}`, { status: 404 });
+      }
 
-				// Parse user request body
-				const reqBody = await request.json();
+      // 3. Prepare the Request
+      const requestBody = await request.json();
 
-				// Construct payload for Hugging Face
-				const payload = {
-					model: selectedModel,
-					messages: reqBody.messages,
-					stream: false, // Set to true if you implement streaming later
-					max_tokens: reqBody.max_tokens || 1024,
-					temperature: reqBody.temperature || 0.7
-				};
+      // FORCE the model ID based on the URL
+      requestBody.model = targetModelId;
 
-				// Call Hugging Face API
-				const hfResponse = await fetch("https://router.huggingface.co/v1/chat/completions", {
-					method: "POST",
-					headers: {
-						"Authorization": `Bearer ${env.HF_TOKEN}`,
-						"Content-Type": "application/json",
-					},
-					body: JSON.stringify(payload),
-				});
+      // 4. Forward to Hugging Face
+      const upstreamResponse = await fetch("https://router.huggingface.co/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // Use the token stored in Cloudflare Secrets
+          "Authorization": `Bearer ${env.HF_TOKEN}`
+        },
+        body: JSON.stringify(requestBody)
+      });
 
-				// Return the HF response directly to the user
-				const data = await hfResponse.json();
-				
-				return new Response(JSON.stringify(data), {
-					status: hfResponse.status,
-					headers: { ...corsHeaders, "Content-Type": "application/json" },
-				});
+      // 5. Stream the response back
+      return new Response(upstreamResponse.body, {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headers: {
+          ...Object.fromEntries(upstreamResponse.headers),
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
 
-			} catch (err) {
-				return new Response(JSON.stringify({ error: err.message }), {
-					status: 500,
-					headers: { ...corsHeaders, "Content-Type": "application/json" },
-				});
-			}
-		}
-
-		// 404 for any other route
-		return new Response("Not Found", { status: 404, headers: corsHeaders });
-	},
+    } catch (error) {
+      return new Response(JSON.stringify({ error: error.message }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
 };
