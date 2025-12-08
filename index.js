@@ -8,22 +8,28 @@ const MODELS = {
   "qwen": "Qwen/Qwen3-VL-8B-Instruct"
 };
 
+// Define CORS headers once to use everywhere
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
 export default {
   async fetch(request, env, ctx) {
-    // 1. Handle CORS (Allow access from any website)
+    // 1. Handle CORS Preflight (OPTIONS request)
     if (request.method === "OPTIONS") {
       return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        },
+        headers: corsHeaders,
       });
     }
 
     // Only allow POST requests
     if (request.method !== "POST") {
-      return new Response("Method Not Allowed", { status: 405 });
+      return new Response(JSON.stringify({ error: "Method Not Allowed" }), { 
+        status: 405,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
     }
 
     const url = new URL(request.url);
@@ -31,19 +37,29 @@ export default {
     try {
       // 2. ROUTING LOGIC
       // Expected URL pattern: /api/<model_slug>/v1/chat/completions
-      // Regex to capture the word between /api/ and /v1
       const pathRegex = /^\/api\/([a-zA-Z0-9-]+)\/v1/;
       const match = url.pathname.match(pathRegex);
 
       if (!match || !match[1]) {
-        return new Response("Invalid API Endpoint format. Use /api/<model>/v1", { status: 404 });
+        return new Response(JSON.stringify({ error: "Invalid API Endpoint format. Use /api/<model>/v1" }), { 
+            status: 404, 
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
       }
 
       const modelSlug = match[1]; // e.g., "kimi", "deepseek"
       const targetModelId = MODELS[modelSlug];
 
       if (!targetModelId) {
-        return new Response(`Model '${modelSlug}' not found. Available: ${Object.keys(MODELS).join(", ")}`, { status: 404 });
+        return new Response(JSON.stringify({ error: `Model '${modelSlug}' not found. Available: ${Object.keys(MODELS).join(", ")}` }), { 
+            status: 404, 
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      // Check for Token before processing
+      if (!env.HF_TOKEN) {
+        throw new Error("Server Error: HF_TOKEN is missing in Worker Secrets.");
       }
 
       // 3. Prepare the Request
@@ -57,26 +73,30 @@ export default {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          // Use the token stored in Cloudflare Secrets
           "Authorization": `Bearer ${env.HF_TOKEN}`
         },
         body: JSON.stringify(requestBody)
       });
 
       // 5. Stream the response back
+      // We create a new response to ensure we attach OUR CORS headers
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
         headers: {
           ...Object.fromEntries(upstreamResponse.headers),
-          "Access-Control-Allow-Origin": "*"
+          ...corsHeaders // FORCE CORS HEADERS
         }
       });
 
     } catch (error) {
+      // 6. HANDLE ERRORS WITH CORS (This fixes "Failed to fetch")
       return new Response(JSON.stringify({ error: error.message }), {
         status: 500,
-        headers: { "Content-Type": "application/json" }
+        headers: { 
+            "Content-Type": "application/json",
+            ...corsHeaders 
+        }
       });
     }
   }
