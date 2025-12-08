@@ -1,5 +1,5 @@
 name = "arsychat-api"
-main = "src/index.js"
+main = "index.js"
 compatibility_date = "2024-01-01"
 
 # We don't put the API key here for security.
