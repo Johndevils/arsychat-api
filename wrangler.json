@@ -1,0 +1,8 @@
+{
+  "name": "arsychat-api",
+  "main": "index.js",
+  "compatibility_date": "2024-12-08",
+  "observability": {
+    "enabled": true
+  }
+}
