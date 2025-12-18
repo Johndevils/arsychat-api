@@ -8,11 +8,12 @@ const MODELS = {
   "qwen": "Qwen/Qwen3-VL-8B-Instruct"
 };
 
-// Define CORS headers once to use everywhere
+// Define CORS headers
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, OPTIONS", // Changed to allow GET
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate", // Prevent browser caching
 };
 
 export default {
@@ -24,9 +25,9 @@ export default {
       });
     }
 
-    // Only allow POST requests
-    if (request.method !== "POST") {
-      return new Response(JSON.stringify({ error: "Method Not Allowed" }), { 
+    // Only allow GET requests now
+    if (request.method !== "GET") {
+      return new Response(JSON.stringify({ error: "Method Not Allowed. Use GET." }), { 
         status: 405,
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
@@ -47,30 +48,46 @@ export default {
         });
       }
 
-      const modelSlug = match[1]; // e.g., "kimi", "deepseek"
+      const modelSlug = match[1]; 
       const targetModelId = MODELS[modelSlug];
 
       if (!targetModelId) {
-        return new Response(JSON.stringify({ error: `Model '${modelSlug}' not found. Available: ${Object.keys(MODELS).join(", ")}` }), { 
+        return new Response(JSON.stringify({ error: `Model '${modelSlug}' not found.` }), { 
             status: 404, 
             headers: { ...corsHeaders, "Content-Type": "application/json" }
         });
       }
 
-      // Check for Token before processing
+      // 3. GET INPUT FROM URL (Query Params)
+      // Example: .../chat/completions?prompt=Hello%20World
+      const userPrompt = url.searchParams.get("prompt") || url.searchParams.get("q") || url.searchParams.get("message");
+
+      if (!userPrompt) {
+        return new Response(JSON.stringify({ error: "Missing 'prompt' parameter in URL" }), { 
+            status: 400, 
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+
+      // Check for Token
       if (!env.HF_TOKEN) {
         throw new Error("Server Error: HF_TOKEN is missing in Worker Secrets.");
       }
 
-      // 3. Prepare the Request
-      const requestBody = await request.json();
+      // 4. CONSTRUCT THE BODY FOR HUGGING FACE
+      // Even though we received a GET, Hugging Face requires a POST with JSON
+      const requestBody = {
+        model: targetModelId,
+        messages: [
+            { role: "user", content: userPrompt }
+        ],
+        stream: false, // Recommended false for GET requests to keep it simple
+        max_tokens: 1024
+      };
 
-      // FORCE the model ID based on the URL
-      requestBody.model = targetModelId;
-
-      // 4. Forward to Hugging Face
+      // 5. FORWARD TO HUGGING FACE (Must remain POST)
       const upstreamResponse = await fetch("https://router.huggingface.co/v1/chat/completions", {
-        method: "POST",
+        method: "POST", // Internal request is still POST
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${env.HF_TOKEN}`
@@ -78,19 +95,17 @@ export default {
         body: JSON.stringify(requestBody)
       });
 
-      // 5. Stream the response back
-      // We create a new response to ensure we attach OUR CORS headers
+      // 6. RETURN RESPONSE
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
         headers: {
           ...Object.fromEntries(upstreamResponse.headers),
-          ...corsHeaders // FORCE CORS HEADERS
+          ...corsHeaders
         }
       });
 
     } catch (error) {
-      // 6. HANDLE ERRORS WITH CORS (This fixes "Failed to fetch")
       return new Response(JSON.stringify({ error: error.message }), {
         status: 500,
         headers: { 
