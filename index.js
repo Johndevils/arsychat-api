@@ -1,6 +1,11 @@
-// index.js
+/**
+ * Arsychat Ai - Cloudflare Worker
+ * Supports BOTH GET and POST requests.
+ * 
+ * GET Example:  /api/glm/v1/chat/completions?prompt=Hello
+ * POST Example: /api/glm/v1/chat/completions with body {"prompt": "Hello"}
+ */
 
-// Map specific URL slugs to the full Hugging Face Model IDs
 const MODELS = {
   "glm": "zai-org/GLM-4.6",
   "deepseek": "deepseek-ai/DeepSeek-V3.2",
@@ -8,110 +13,101 @@ const MODELS = {
   "qwen": "Qwen/Qwen3-VL-8B-Instruct"
 };
 
-// Define CORS headers
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS", // Changed to allow GET
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate", // Prevent browser caching
+  "Content-Type": "application/json"
 };
 
 export default {
-  async fetch(request, env, ctx) {
-    // 1. Handle CORS Preflight (OPTIONS request)
+  async fetch(request, env) {
+    // 1. Handle Preflight OPTIONS (Important for Frontend)
     if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: corsHeaders,
-      });
-    }
-
-    // Only allow GET requests now
-    if (request.method !== "GET") {
-      return new Response(JSON.stringify({ error: "Method Not Allowed. Use GET." }), { 
-        status: 405,
-        headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
+      return new Response(null, { headers: corsHeaders });
     }
 
     const url = new URL(request.url);
+    const pathSegments = url.pathname.split('/');
+    
+    // Path structure: /api/[modelSlug]/v1/chat/completions
+    const modelSlug = pathSegments[2]; 
+    const targetModelId = MODELS[modelSlug];
 
     try {
-      // 2. ROUTING LOGIC
-      // Expected URL pattern: /api/<model_slug>/v1/chat/completions
-      const pathRegex = /^\/api\/([a-zA-Z0-9-]+)\/v1/;
-      const match = url.pathname.match(pathRegex);
-
-      if (!match || !match[1]) {
-        return new Response(JSON.stringify({ error: "Invalid API Endpoint format. Use /api/<model>/v1" }), { 
-            status: 404, 
-            headers: { ...corsHeaders, "Content-Type": "application/json" }
-        });
-      }
-
-      const modelSlug = match[1]; 
-      const targetModelId = MODELS[modelSlug];
-
+      // 2. Initial Validations
       if (!targetModelId) {
-        return new Response(JSON.stringify({ error: `Model '${modelSlug}' not found.` }), { 
-            status: 404, 
-            headers: { ...corsHeaders, "Content-Type": "application/json" }
+        return new Response(JSON.stringify({ error: `Model '${modelSlug}' invalid.` }), { 
+          status: 404, 
+          headers: corsHeaders 
         });
       }
 
-      // 3. GET INPUT FROM URL (Query Params)
-      // Example: .../chat/completions?prompt=Hello%20World
-      const userPrompt = url.searchParams.get("prompt") || url.searchParams.get("q") || url.searchParams.get("message");
-
-      if (!userPrompt) {
-        return new Response(JSON.stringify({ error: "Missing 'prompt' parameter in URL" }), { 
-            status: 400, 
-            headers: { ...corsHeaders, "Content-Type": "application/json" }
-        });
-      }
-
-      // Check for Token
       if (!env.HF_TOKEN) {
-        throw new Error("Server Error: HF_TOKEN is missing in Worker Secrets.");
+        throw new Error("Server secret HF_TOKEN is missing.");
       }
 
-      // 4. CONSTRUCT THE BODY FOR HUGGING FACE
-      // Even though we received a GET, Hugging Face requires a POST with JSON
-      const requestBody = {
-        model: targetModelId,
-        messages: [
-            { role: "user", content: userPrompt }
-        ],
-        stream: false, // Recommended false for GET requests to keep it simple
-        max_tokens: 1024
-      };
+      let userPrompt = "";
 
-      // 5. FORWARD TO HUGGING FACE (Must remain POST)
-      const upstreamResponse = await fetch("https://router.huggingface.co/v1/chat/completions", {
-        method: "POST", // Internal request is still POST
+      // 3. Handle GET Request Logic
+      if (request.method === "GET") {
+        userPrompt = url.searchParams.get("prompt") || url.searchParams.get("q");
+      } 
+      
+      // 4. Handle POST Request Logic
+      else if (request.method === "POST") {
+        try {
+          const body = await request.json();
+          // Support both OpenAI format {messages: [{...}]} and simple {prompt: "..."}
+          if (body.messages && Array.isArray(body.messages)) {
+            userPrompt = body.messages[body.messages.length - 1].content;
+          } else {
+            userPrompt = body.prompt;
+          }
+        } catch (e) {
+          throw new Error("Invalid JSON body in POST request.");
+        }
+      } 
+      
+      else {
+        throw new Error("Only GET and POST methods are supported.");
+      }
+
+      // Final check if prompt exists
+      if (!userPrompt) {
+        throw new Error("No prompt found. For GET use ?prompt=... and for POST use body {'prompt': '...'}");
+      }
+
+      // 5. Forward to Hugging Face Router
+      const hfResponse = await fetch("https://router.huggingface.co/v1/chat/completions", {
+        method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${env.HF_TOKEN}`
+          "Authorization": `Bearer ${env.HF_TOKEN}`,
+          "Content-Type": "application/json"
         },
-        body: JSON.stringify(requestBody)
+        body: JSON.stringify({
+          model: targetModelId,
+          messages: [{ role: "user", content: userPrompt }],
+          max_tokens: 2048,
+          stream: false
+        })
       });
 
-      // 6. RETURN RESPONSE
-      return new Response(upstreamResponse.body, {
-        status: upstreamResponse.status,
-        statusText: upstreamResponse.statusText,
-        headers: {
-          ...Object.fromEntries(upstreamResponse.headers),
-          ...corsHeaders
-        }
+      // 6. Return Clean Response (Avoid header conflicts)
+      const data = await hfResponse.json();
+      
+      return new Response(JSON.stringify(data), {
+        status: hfResponse.status,
+        headers: corsHeaders
       });
 
     } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
-        status: 500,
-        headers: { 
-            "Content-Type": "application/json",
-            ...corsHeaders 
-        }
+      return new Response(JSON.stringify({ 
+        error: error.message,
+        method_used: request.method
+      }), {
+        status: 400,
+        headers: corsHeaders
       });
     }
   }
